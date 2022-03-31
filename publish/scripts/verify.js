@@ -1,5 +1,6 @@
 const hre = require("hardhat");
 const ethers = require("ethers");
+const path = require('path');
 
 require("dotenv").config({ path: path.resolve(`${__dirname}/../../.env.${process.env.NODE_ENV}`), override: true});
 
@@ -51,7 +52,8 @@ async function main() {
         owner,
         oracle,
         [ethers.utils.hexDataSlice(ethers.utils.formatBytes32String("DVDX"), 0, 4)],
-        [ethers.utils.parseEther("0.2")],
+        [ethers.utils.parseEther("0.00386548")],
+        ["derived"],
         CHAINLINK[network].linkToken,
         CHAINLINK[network].oracle,
         ethers.utils.hexZeroPad(CHAINLINK[network].jobId, 32),

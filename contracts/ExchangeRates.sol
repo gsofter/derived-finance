@@ -1,18 +1,5 @@
 /*
------------------------------------------------------------------
-FILE INFORMATION
------------------------------------------------------------------
-
-file:       ExchangeRates.sol
-version:    1.0
-author:     Kevin Brown
-date:       2018-09-12
-
------------------------------------------------------------------
-MODULE DESCRIPTION
------------------------------------------------------------------
-
-A contract that any other contract in the Synthetix system can query
+A contract that any other contract in the DVDX system can query
 for the current market value of various assets, including
 crypto assets as well as various fiat assets.
 
@@ -20,8 +7,6 @@ This contract assumes that rate updates will completely update
 all rates to their current values. If a rate shock happens
 on a single asset, the oracle will still push updated rates
 for all other assets.
-
------------------------------------------------------------------
 */
 
 //SPDX-License-Identifier: Unlicense
@@ -45,6 +30,9 @@ contract ExchangeRates is ChainlinkClient, SelfDestructible {
     // Exchange rates stored by currency code, e.g. 'DVDX', or 'USDx'
     mapping(bytes4 => uint) public rates;
 
+    // Asset tag stored by currency code, e.g. 'DVDX', or 'USDx'
+    mapping(bytes4 => string) public assets;
+
     // Update times stored by currency code, e.g. 'DVDX', or 'USDx'
     mapping(bytes4 => uint) public lastRateUpdateTimes;
 
@@ -56,6 +44,9 @@ contract ExchangeRates is ChainlinkClient, SelfDestructible {
 
     // How long will the contract assume the rate of any asset is correct
     uint public rateStalePeriod = 52 weeks;
+
+    // How long will the contract assume rate update is not needed 
+    uint public rateFreshPeriod = 1 hours;
 
     // Each participating currency in the XDR basket is represented as a currency key with
     // equal weighting.
@@ -93,6 +84,7 @@ contract ExchangeRates is ChainlinkClient, SelfDestructible {
      * @param _dvdxOracle The address which is able to update rate information.
      * @param _currencyKeys The initial currency keys to store (in order).
      * @param _newRates The initial currency amounts for each currency (in order).
+     * @param _newAssets The initial currency asset tag for each currency (in order).
      */
     constructor(
         // SelfDestructible (Ownable)
@@ -102,6 +94,7 @@ contract ExchangeRates is ChainlinkClient, SelfDestructible {
         address _dvdxOracle,
         bytes4[] memory _currencyKeys,
         uint[] memory _newRates,
+        string[] memory _newAssets,
 
         // Chainlink requirementss
         address _chainlinkToken,
@@ -112,6 +105,7 @@ contract ExchangeRates is ChainlinkClient, SelfDestructible {
         SelfDestructible(_owner)
     {
         require(_currencyKeys.length == _newRates.length, "Currency key length and rate length must match.");
+        require(_currencyKeys.length == _newAssets.length, "Currency key length and asset length must match.");
 
         dvdxOracle = _dvdxOracle;
 
@@ -135,6 +129,7 @@ contract ExchangeRates is ChainlinkClient, SelfDestructible {
         ];
 
         internalUpdateRates(_currencyKeys, _newRates, block.timestamp);
+        internalUpdateAssets(_currencyKeys, _newAssets);
 
         // Setup Chainlink props
         setChainlinkToken(_chainlinkToken);
@@ -204,6 +199,49 @@ contract ExchangeRates is ChainlinkClient, SelfDestructible {
     }
 
     /**
+     * @notice Set the assets stored in this contract
+     * @param currencyKeys The currency keys you wish to update the rates for (in order)
+     * @param newAssets The assets for each currency (in order)
+     */
+    function updateAssets(bytes4[] memory currencyKeys, string[] memory newAssets)
+        external
+        onlyOwner
+        returns(bool)
+    {
+        return internalUpdateAssets(currencyKeys, newAssets);
+    }
+
+    /**
+     * @notice Internal function which sets the assets stored in this contract
+     * @param currencyKeys The currency keys you wish to update the rates for (in order)
+     * @param newAssets The assets for each currency (in order)
+     *
+     */
+    function internalUpdateAssets(bytes4[] memory currencyKeys, string[] memory newAssets)
+        internal
+        returns(bool)
+    {
+        require(currencyKeys.length == newAssets.length, "Currency key array length must match assets array length.");
+
+        // Loop through each key and perform update.
+        for (uint i = 0; i < currencyKeys.length; i++) {
+            // Should not set any asset to zero ever, as no asset will ever be
+            // truely worthless and still valid. In this scenario, we should
+            // delete the asset and remove it from the system.
+            require(keccak256(abi.encodePacked(newAssets[i])) != keccak256(abi.encodePacked("")), "Zero is not a valid rate, please call deleteRate instead.");
+            require(currencyKeys[i] != "USDx", "Asset of USDx cannot be updated, it's always UNIT.");
+            require(currencyKeys[i] != "XDR", "Asset of XDR cannot be updated, it's always UNIT.");
+
+            // Ok, go ahead with the update.
+            assets[currencyKeys[i]] = newAssets[i];
+        }
+
+        emit AssetsUpdated(currencyKeys, newAssets);
+
+        return true;
+    }
+
+    /**
      * @notice Internal function to get the inverted rate, if any, and mark an inverted
      *  key as frozen if either limits are reached.
      * @param currencyKey The price key to lookup
@@ -248,7 +286,7 @@ contract ExchangeRates is ChainlinkClient, SelfDestructible {
     }
 
     /**
-     * @notice Update the Synthetix Drawing Rights exchange rate based on other rates already updated.
+     * @notice Update the DVDX Drawing Rights exchange rate based on other rates already updated.
      */
     function updateXDRRate(uint timeSent)
         internal
@@ -314,6 +352,18 @@ contract ExchangeRates is ChainlinkClient, SelfDestructible {
     {
         rateStalePeriod = _time;
         emit RateStalePeriodUpdated(rateStalePeriod);
+    }
+
+    /**
+     * @notice Set the fresh period on the updated rate variables
+     * @param _time The new rateFreshPeriod
+     */
+    function setRateFreshPeriod(uint _time)
+        external
+        onlyOwner
+    {
+        rateFreshPeriod = _time;
+        emit RateFreshPeriodUpdated(rateFreshPeriod);
     }
 
     /**
@@ -505,15 +555,17 @@ contract ExchangeRates is ChainlinkClient, SelfDestructible {
      * @notice Initiatiate a price request via chainlink. Provide both the
      * bytes4 currencyKey (for DVDX) and the string representation (for Chainlink)
      */
-    function requestCryptoPrice(bytes4 currencyKey, string memory asset)
+    function requestCryptoPrice(bytes4 currencyKey)
     public
     onlyOwner
     {
+        require(block.timestamp >= (lastRateUpdateTimes[currencyKey] + rateFreshPeriod), "No need to update rates");
+
         Chainlink.Request memory req = buildChainlinkRequest(oracleJobId, address(this), this.fulfill.selector);
-        string memory requestURL = string(abi.encodePacked("https://api.coingecko.com/api/v3/simple/price?ids=", asset, "&vs_currencies=usd"));
+        string memory requestURL = string(abi.encodePacked("https://api.coingecko.com/api/v3/simple/price?ids=", assets[currencyKey], "&vs_currencies=usd"));
         req.add("get", requestURL);
 
-        string memory path = string(abi.encodePacked(asset, ".usd"));
+        string memory path = string(abi.encodePacked(assets[currencyKey], ".usd"));
         req.add("path", path);
         
         req.addInt("times", int256(ORACLE_PRECISION));
@@ -582,7 +634,9 @@ contract ExchangeRates is ChainlinkClient, SelfDestructible {
 
     event OracleUpdated(address newOracle);
     event RateStalePeriodUpdated(uint rateStalePeriod);
+    event RateFreshPeriodUpdated(uint rateFreshPeriod);
     event RatesUpdated(bytes4[] currencyKeys, uint[] newRates);
+    event AssetsUpdated(bytes4[] currencyKeys, string[] newAssets);
     event RateDeleted(bytes4 currencyKey);
     event InversePriceConfigured(bytes4 currencyKey, uint entryPoint, uint upperLimit, uint lowerLimit);
     event InversePriceFrozen(bytes4 currencyKey);
